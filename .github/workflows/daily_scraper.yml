@@ -1,0 +1,27 @@
+name: Daily Vietnam Auction Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 가동 환경 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 필수 라이브러리 설치
+        run: |
+          pip install requests beautifulsoup4 supabase urllib3
+
+      - name: 파이프라인 자동 실행
+        run: |
+          python pipeline_scraper.py
