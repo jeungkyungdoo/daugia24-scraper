@@ -9,7 +9,8 @@ from datetime import datetime
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://krhpohjoxeegslyjptes.supabase.co")
+# 대표님의 진짜 수파베이스 프로젝트 주소로 완벽히 수정 완료
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://sznnlmtgoiqxgbhqjqfg.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
 
 if not SUPABASE_KEY:
@@ -66,7 +67,6 @@ def fetch_latest_auctions(page=1, page_size=40):
     return []
 
 def normalize_property(raw):
-    # Match various key variations from DGTS API
     notice_code = extract_field(raw, ["maSoThongBao", "noticeCode", "code", "auctionCode", "soThongBao", "idThongBao"])
     dgts_id = extract_field(raw, ["dgtsId", "id", "auctionId", "taiSanId", "auctionInfoId"])
     title = extract_field(raw, ["tenTaiSan", "title", "name", "propertyName", "tenThongBao"])
@@ -85,7 +85,6 @@ def normalize_property(raw):
     deposit = extract_field(raw, ["tienDatTruoc", "deposit", "depositAmount", "datCoc"], "Cọc: 10% - 20%")
     date_val = extract_field(raw, ["ngayDauGia", "auctionDate", "openDate", "auctionStartDate", "thoiGianDauGia"])
     
-    # Standardize date to YYYY-MM-DD
     auction_date = ""
     if date_val:
         for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"]:
@@ -100,7 +99,6 @@ def normalize_property(raw):
 
     status = "Đang mở đấu giá"
     
-    # Reject completely empty rows to prevent NULL pollution
     if not title and not notice_code and not dgts_id:
         return None
 
@@ -136,7 +134,6 @@ def run_pipeline():
     logging.info("Starting Daily National Auction Pipeline Scraper...")
     all_clean_records = []
     
-    # Scrape first 3 pages of active announcements
     for p in range(1, 4):
         items = fetch_latest_auctions(page=p, page_size=30)
         logging.info(f"Fetched {len(items)} items from page {p}")
@@ -153,4 +150,4 @@ def run_pipeline():
         logging.warning("No valid records found in current fetch cycle.")
 
 if __name__ == "__main__":
-    run_pipeline() 
+    run_pipeline()
