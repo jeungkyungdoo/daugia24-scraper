@@ -1,79 +1,156 @@
 import os
-import re
-import datetime
-import urllib3
+import sys
+import time
+import json
+import logging
 import requests
-from supabase import create_client, Client
+from datetime import datetime
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Supabase 연동 설정
-SUPABASE_URL = "https://sznnlmtgoiqxgbhqjqfg.supabase.co"
-SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6bm5sbXRnb2lxeGdiaHFqcWZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4NTM0ODUsImV4cCI6MjEwNDQyOTQ4NX0.r--e2DrkD3-kDxGsaNXD36ckv8f_r_BUwXNvEraCzuI"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://krhpohjoxeegslyjptes.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+if not SUPABASE_KEY:
+    logging.warning("SUPABASE KEY is missing in environment. Using default service context if available.")
 
-def fetch_latest_announcements():
-    print("[*] 베트남 공공/법무부 핵심 경매 공고 적재 파이프라인 가동...")
-    collected_count = 0
+API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json;charset=UTF-8",
+    "Referer": "https://dgts.moj.gov.vn/"
+}
 
-    # 핵심 타깃 매물 데이터베이스
-    target_data = [
-        ("Quyền sử dụng đất ở tại đô thị, Tổ 7, phường Thạch Bàn, quận Long Biên, TP Hà Nội", "Hà Nội", "https://dgts.moj.gov.vn/thong-bao-cong-khai-viec-dau-gia/tb-636273.html"),
-        ("Quyền sử dụng 31 lô đất ở thuộc Khu dân cư xã Tân Dĩnh, tỉnh Bắc Ninh (5.177,3m2)", "Bắc Ninh", "https://dgts.moj.gov.vn/thong-bao-cong-khai-viec-dau-gia/quyen-su-dung-31-lo-dat-o-thuoc-cac-khu-dan-cu-587685.html"),
-        ("Đấu giá quyền sử dụng đất và tài sản gắn liền tại xã Hương Đô, tỉnh Hà Tĩnh", "Hà Tĩnh", "https://baodauthau.vn/ngay-01102026-dau-gia-quyen-su-dung-dat-post206976.html"),
-        ("Quyền sử dụng đất ở tại khu Sân Than, tổ dân phố Đại Phẩm, phường Chương Mỹ, Hà Nội", "Hà Nội", "https://dgts.moj.gov.vn/thong-bao-cong-khai-viec-dau-gia/tb-602898.html")
-    ]
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "resolution=merge-duplicates"
+}
 
-    for title, city, link in target_data:
-        try:
-            moj_id = str(abs(hash(link)))[:8]
-            record = {
-                "moj_notice_id": f"VN_{moj_id}",
-                "Tên tài sản đấu giá": title,
-                "link_detail": link,
-                "status_tab": "OPEN",
-                "result_status": "PENDING",
-                "last_synced_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-            }
-            supabase.table('auctions').upsert(record, on_conflict='moj_notice_id').execute()
-            collected_count += 1
-            print(f"  [+] 매물 수집 적재 성공 #{moj_id}: {title[:30]}...")
-        except Exception as e:
-            print(f"  [!] 적재 예외 발생 #{moj_id}: {e}")
+def clean_value(val):
+    if val is None:
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() == "null" else s
 
-    print(f"[+] 총 {collected_count}건의 신규 공고 Supabase 적재 완료.")
+def extract_field(item, keys, default=""):
+    for k in keys:
+        if k in item and item[k] is not None:
+            val = str(item[k]).strip()
+            if val and val.lower() != "null":
+                return val
+    return default
 
-def track_auction_results():
-    print("[*] 개찰 완료 매물 결과(Kết quả) 추적 및 상태 업데이트 가동...")
+def fetch_latest_auctions(page=1, page_size=40):
+    url = "https://dgts.moj.gov.vn/api/auction/search"
+    payload = {
+        "page": page,
+        "pageSize": page_size,
+        "status": "",
+        "keyword": "",
+        "orderBy": "createdDate",
+        "orderDirection": "desc"
+    }
     try:
-        res = supabase.table('auctions') \
-            .select('id, moj_notice_id, result_status') \
-            .eq('result_status', 'PENDING') \
-            .limit(10) \
-            .execute()
-            
-        pending_items = res.data or []
-        print(f"[*] 결과 업데이트 대상 대기 매물: {len(pending_items)}건")
-
-        for item in pending_items:
-            item_id = item.get('id')
-            status_val = "WON" if (item_id % 2 == 0) else "PASSED"
-            
-            update_payload = {
-                "status_tab": "CLOSED",
-                "result_status": status_val,
-                "winning_price_text": "Đã có kết quả trúng giá (낙찰)" if status_val == "WON" else "Chờ mở lại (유찰)",
-                "last_synced_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-            }
-            supabase.table('auctions').update(update_payload).eq('id', item_id).execute()
-            print(f"  -> 매물 #{item_id}: 상태 [{status_val}]로 갱신 완료")
-
+        res = requests.post(url, json=payload, headers=API_HEADERS, timeout=25)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, dict):
+                return data.get("items") or data.get("data") or data.get("content") or []
+            elif isinstance(data, list):
+                return data
     except Exception as e:
-        print(f"[!] 결과 추적 오류: {e}")
+        logging.error(f"Failed to fetch from dgts API (page {page}): {e}")
+    return []
+
+def normalize_property(raw):
+    # Match various key variations from DGTS API
+    notice_code = extract_field(raw, ["maSoThongBao", "noticeCode", "code", "auctionCode", "soThongBao", "idThongBao"])
+    dgts_id = extract_field(raw, ["dgtsId", "id", "auctionId", "taiSanId", "auctionInfoId"])
+    title = extract_field(raw, ["tenTaiSan", "title", "name", "propertyName", "tenThongBao"])
+    category = extract_field(raw, ["loaiTaiSan", "category", "categoryName", "nhomTaiSan"], "Đất/Nhà ở")
+    province = extract_field(raw, ["tinhThanh", "province", "city", "diaChi"], "Toàn quốc")
+    organizer = extract_field(raw, ["toChucDauGia", "organizer", "tenToChucDauGia", "companyName"], "Tổ chức đấu giá Quốc gia")
+    
+    price_val = extract_field(raw, ["giaKhoiDiem", "startPrice", "price", "startingPrice"], "0")
+    try:
+        clean_num = "".join([c for c in price_val if c.isdigit()])
+        price_num = int(clean_num) if clean_num else 0
+        price_str = f"{price_num:,} VNĐ".replace(",", ".") if price_num > 0 else "Thỏa thuận"
+    except Exception:
+        price_str = price_val if price_val else "Thỏa thuận"
+
+    deposit = extract_field(raw, ["tienDatTruoc", "deposit", "depositAmount", "datCoc"], "Cọc: 10% - 20%")
+    date_val = extract_field(raw, ["ngayDauGia", "auctionDate", "openDate", "auctionStartDate", "thoiGianDauGia"])
+    
+    # Standardize date to YYYY-MM-DD
+    auction_date = ""
+    if date_val:
+        for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"]:
+            try:
+                dt = datetime.strptime(date_val[:10], fmt)
+                auction_date = dt.strftime("%Y-%m-%d")
+                break
+            except Exception:
+                continue
+    if not auction_date:
+        auction_date = datetime.now().strftime("%Y-%m-%d")
+
+    status = "Đang mở đấu giá"
+    
+    # Reject completely empty rows to prevent NULL pollution
+    if not title and not notice_code and not dgts_id:
+        return None
+
+    return {
+        "Mã số thông báo": notice_code or f"TB-{int(time.time())}",
+        "Mã số thông báo là mã dự phòng (auctionInfoId)": dgts_id or notice_code,
+        "DGTS ID": int(dgts_id) if dgts_id and dgts_id.isdigit() else None,
+        "Tên tài sản": title or "Tài sản đấu giá thanh lý (Chi tiết trong hồ sơ)",
+        "Loại tài sản": category,
+        "Tỉnh/Thành phố": province,
+        "Tổ chức đấu giá": organizer,
+        "Giá khởi điểm": price_str,
+        "Tiền đặt trước": deposit,
+        "Ngày đấu giá": auction_date,
+        "Trạng thái": status,
+        "created_at": datetime.utcnow().isoformat() + "Z"
+    }
+
+def push_to_supabase(records):
+    if not records or not SUPABASE_KEY:
+        return
+    url = f"{SUPABASE_URL}/rest/v1/auctions"
+    try:
+        res = requests.post(url, json=records, headers=SUPABASE_HEADERS, timeout=30)
+        if res.status_code in [200, 201]:
+            logging.info(f"Successfully inserted/updated {len(records)} auction items to Supabase without NULLs.")
+        else:
+            logging.error(f"Supabase push error [{res.status_code}]: {res.text}")
+    except Exception as e:
+        logging.error(f"Supabase connection exception: {e}")
+
+def run_pipeline():
+    logging.info("Starting Daily National Auction Pipeline Scraper...")
+    all_clean_records = []
+    
+    # Scrape first 3 pages of active announcements
+    for p in range(1, 4):
+        items = fetch_latest_auctions(page=p, page_size=30)
+        logging.info(f"Fetched {len(items)} items from page {p}")
+        for item in items:
+            normalized = normalize_property(item)
+            if normalized:
+                all_clean_records.append(normalized)
+        time.sleep(1)
+
+    if all_clean_records:
+        logging.info(f"Total valid, non-NULL records ready for DB: {len(all_clean_records)}")
+        push_to_supabase(all_clean_records)
+    else:
+        logging.warning("No valid records found in current fetch cycle.")
 
 if __name__ == "__main__":
-    print("=== ĐẤU GIÁ 24 데이터 자동화 파이프라인 가동 ===")
-    fetch_latest_announcements()
-    track_auction_results()
-    print("=== 전체 파이프라인 동기화 완료 ===")
+    run_pipeline() 
