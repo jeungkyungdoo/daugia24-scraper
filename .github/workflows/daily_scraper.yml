@@ -2,7 +2,8 @@ name: Daily Vietnam Auction Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # 베트남 시간 오전 03:00 (UTC 20:00 / 한국 시간 05:00) 매일 자동 실행
+    - cron: '0 20 * * *'
   workflow_dispatch:
 
 jobs:
@@ -20,8 +21,12 @@ jobs:
 
       - name: 필수 라이브러리 설치
         run: |
-          pip install requests beautifulsoup4 supabase urllib3
+          python -m pip install --upgrade pip
+          pip install requests supabase python-dateutil urllib3
 
-      - name: 파이프라인 자동 실행
+      - name: 법무부 경매 데이터 크롤링 및 수파베이스 동기화 실행
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python pipeline_scraper.py
+          python pipeline_scraper.py 
