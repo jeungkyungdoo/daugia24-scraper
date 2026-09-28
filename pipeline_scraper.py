@@ -1,4 +1,4 @@
- import os
+import os
 import sys
 import time
 import json
@@ -50,13 +50,8 @@ def parse_date(date_str):
     return None, clean
 
 def fetch_nationwide_auction_houses():
-    """
-    베트남 전국 공인 경매 회사(Lac Viet, Dau Gia Viet Nam, 전국 포털 피드) 수집
-    신건(OPEN), 낙찰건(CLOSED/SUCCESS), 유찰건(FAILED) 전체 수집
-    """
     all_properties = []
     
-    # 1. 전국 단위 경매 포털 오픈 피드 엔드포인트
     target_sources = [
         {"name": "Đấu giá Lạc Việt (Toàn Quốc)", "url": "https://lacvietauction.vn/api/auction-assets?page=1&limit=40"},
         {"name": "Công ty Đấu giá Hợp danh Việt Nam", "url": "https://vpa.com.vn/api/auction/all-listings"},
@@ -83,9 +78,6 @@ def fetch_nationwide_auction_houses():
     return all_properties
 
 def normalize_to_auctions(raw):
-    """
-    대표님의 원본 테이블 'public.auctions' 베트남어 컬럼 규격으로 매핑
-    """
     title = raw.get("title") or raw.get("tenTaiSan") or raw.get("name") or raw.get("assetName")
     if not title:
         return None
@@ -104,7 +96,6 @@ def normalize_to_auctions(raw):
     deadline_raw = raw.get("deadline") or raw.get("hanNopHoSo") or ""
     _, display_deadline = parse_date(deadline_raw)
 
-    # 탭 분류 핵심 로직: 신건(OPEN), 낙찰(CLOSED), 유찰(FAILED)
     status_raw = str(raw.get("status") or raw.get("trangThai") or "").upper()
     status_tab = "OPEN"
     result_status = "PENDING"
