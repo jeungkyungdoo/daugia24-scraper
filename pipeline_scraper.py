@@ -1,11 +1,12 @@
 import os
 import sys
 import time
-import json
+import re
 import logging
 import requests
 import urllib3
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -25,8 +26,8 @@ SUPABASE_HEADERS = {
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 def clean_money(val):
@@ -41,95 +42,133 @@ def parse_date(date_str):
     if not date_str:
         return None, "Chưa có lịch"
     clean = str(date_str).strip()
-    for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M"]:
+    match = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})", clean)
+    if match:
+        day, month, year = match.groups()
         try:
-            dt = datetime.strptime(clean[:19], fmt)
+            dt = datetime(int(year), int(month), int(day))
             return dt.strftime("%Y-%m-%d"), dt.strftime("%d/%m/%Y")
         except Exception:
-            continue
+            pass
     return None, clean
 
-def fetch_nationwide_auction_houses():
-    all_properties = []
-    
-    target_sources = [
-        {"name": "Đấu giá Lạc Việt (Toàn Quốc)", "url": "https://lacvietauction.vn/api/auction-assets?page=1&limit=40"},
-        {"name": "Công ty Đấu giá Hợp danh Việt Nam", "url": "https://vpa.com.vn/api/auction/all-listings"},
-        {"name": "Cổng Đấu giá Tài sản Quốc gia (Portal Mirror)", "url": "https://daugiaso5.vn/api/public/auctions"}
+def scrape_lacviet_auctions():
+    """
+    베트남 대표 전국 경매사(Lạc Việt) 웹페이지 직접 파싱
+    """
+    items = []
+    urls = [
+        "https://lacvietauction.vn/tai-san-dau-gia",
+        "https://lacvietauction.vn/tai-san-dau-gia?page=2"
     ]
-
-    for source in target_sources:
+    for url in urls:
         try:
-            res = requests.get(source["url"], headers=HEADERS, timeout=15, verify=False)
+            res = requests.get(url, headers=HEADERS, timeout=20, verify=False)
             if res.status_code == 200:
-                data = res.json()
-                items = data.get("items") or data.get("data") or data.get("list") or (data if isinstance(data, list) else [])
-                logging.info(f"[{source['name']}] Successfully collected {len(items)} listings.")
-                
-                for item in items:
-                    item["_source_org"] = source["name"]
-                    all_properties.append(item)
-            else:
-                logging.warning(f"[{source['name']}] HTTP {res.status_code}")
-        except Exception as e:
-            logging.warning(f"Notice on [{source['name']}]: {str(e)[:60]}")
-        time.sleep(1)
+                soup = BeautifulSoup(res.text, "html.parser")
+                cards = soup.select(".auction-item, .card-auction, .item-asset, .box-asset") or soup.find_all("div", class_=re.compile(r"item|product|auction"))
+                for c in cards:
+                    title_elem = c.find(["h3", "h4", "a"], class_=re.compile(r"title|name"))
+                    if not title_elem:
+                        continue
+                    title = title_elem.get_text(strip=True)
+                    if len(title) < 5:
+                        continue
+                    
+                    price_elem = c.find(text=re.compile(r"VNĐ|Giá|đồng", re.I))
+                    price = price_elem.strip() if price_elem else "Thỏa thuận"
+                    
+                    link_elem = c.find("a", href=True)
+                    link = link_elem["href"] if link_elem else url
+                    if not link.startswith("http"):
+                        link = "https://lacvietauction.vn" + link
 
-    return all_properties
+                    text_all = c.get_text()
+                    items.append({
+                        "title": title,
+                        "price": price,
+                        "address": "Toàn quốc",
+                        "organizer": "Công ty Đấu giá Hợp danh Lạc Việt",
+                        "status_text": text_all,
+                        "url": link
+                    })
+        except Exception as e:
+            logging.warning(f"Lạc Việt scrape notice: {e}")
+        time.sleep(1)
+    return items
+
+def scrape_vpa_auctions():
+    """
+    베트남 자산 경매 포털(VPA / Hợp Danh Việt Nam) 파싱
+    """
+    items = []
+    target_url = "https://vpa.com.vn/danh-sach-tai-san"
+    try:
+        res = requests.get(target_url, headers=HEADERS, timeout=20, verify=False)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            rows = soup.find_all(["div", "article"], class_=re.compile(r"asset|item|auction"))
+            for r in rows:
+                t_el = r.find(["h2", "h3", "h4", "a"])
+                if not t_el:
+                    continue
+                title = t_el.get_text(strip=True)
+                if len(title) < 5:
+                    continue
+                
+                link_el = r.find("a", href=True)
+                link = link_el["href"] if link_el else target_url
+                if not link.startswith("http"):
+                    link = "https://vpa.com.vn" + link
+
+                items.append({
+                    "title": title,
+                    "price": "Thỏa thuận",
+                    "address": "Toàn quốc",
+                    "organizer": "Công ty Đấu giá Hợp danh Việt Nam",
+                    "status_text": r.get_text(),
+                    "url": link
+                })
+    except Exception as e:
+        logging.warning(f"VPA scrape notice: {e}")
+    return items
 
 def normalize_to_auctions(raw):
-    title = raw.get("title") or raw.get("tenTaiSan") or raw.get("name") or raw.get("assetName")
+    title = raw.get("title")
     if not title:
         return None
 
-    org = raw.get("organizer") or raw.get("toChucDauGia") or raw.get("_source_org") or "Tổ chức hành nghề đấu giá"
-    cat = raw.get("category") or raw.get("loaiTaiSan") or "Quyền sử dụng đất & Bất động sản"
-    addr = raw.get("address") or raw.get("diaChi") or raw.get("province") or "Toàn quốc"
-    
-    price_val = raw.get("startPrice") or raw.get("giaKhoiDiem") or raw.get("price") or "0"
-    price_str = clean_money(price_val)
-    deposit = clean_money(raw.get("deposit") or raw.get("tienDatTruoc") or "10% - 20%")
-
-    date_raw = raw.get("auctionDate") or raw.get("ngayDauGia") or raw.get("openDate")
-    iso_date, display_date = parse_date(date_raw)
-
-    deadline_raw = raw.get("deadline") or raw.get("hanNopHoSo") or ""
-    _, display_deadline = parse_date(deadline_raw)
-
-    status_raw = str(raw.get("status") or raw.get("trangThai") or "").upper()
+    status_text = raw.get("status_text", "").upper()
     status_tab = "OPEN"
     result_status = "PENDING"
-    
-    today_str = datetime.now().strftime("%Y-%m-%d")
 
-    if "KHÔNG THÀNH" in status_raw or "HỦY" in status_raw or "FAILED" in status_raw:
+    # 상태 자동 분류 (신건, 유찰, 낙찰)
+    if any(k in status_text for k in ["KHÔNG THÀNH", "HỦY", "FAILED", "TẠM DỪNG"]):
         status_tab = "FAILED"
         result_status = "FAILED"
-    elif "KẾT THÚC" in status_raw or "THÀNH CÔNG" in status_raw or "CLOSED" in status_raw or (iso_date and iso_date < today_str):
+    elif any(k in status_text for k in ["KẾT THÚC", "ĐÃ BÁN", "THÀNH CÔNG", "CLOSED"]):
         status_tab = "CLOSED"
         result_status = "SUCCESS"
     else:
         status_tab = "OPEN"
         result_status = "PENDING"
 
-    item_id = str(raw.get("id") or raw.get("assetId") or int(time.time()))
-    detail_link = raw.get("url") or raw.get("link") or f"https://daugia24.com/detail/{item_id}"
-    doc_link = raw.get("docUrl") or raw.get("fileDinhKem") or detail_link
+    iso_date, display_date = parse_date(status_text)
+    price_str = clean_money(raw.get("price"))
 
     return {
-        "DGTS ID": int(item_id) if item_id.isdigit() else None,
         "Tên tài sản đấu giá": str(title)[:500],
-        "Loại tài sản": str(cat)[:100],
+        "Loại tài sản": "Đất/Nhà ở",
         "NPL": "N",
         "Giá khởi điểm": price_str,
-        "Tiền đặt trước": deposit,
-        "Địa chỉ / Khu vực tài sản": str(addr)[:500],
+        "Tiền đặt trước": "10% - 20%",
+        "Địa chỉ / Khu vực tài sản": raw.get("address", "Toàn quốc")[:500],
         "Số tài sản trong thông báo": 1,
-        "Thời hạn nộp hồ sơ": display_deadline or "Theo quy chế",
+        "Thời hạn nộp hồ sơ": "Theo quy chế hồ sơ",
         "Thời gian tổ chức đấu giá": display_date,
-        "Tên tổ chức đấu giá / Người có tài sản": str(org)[:300],
-        "Link chi tiết": detail_link,
-        "Link xuất file Doc": doc_link,
+        "Tên tổ chức đấu giá / Người có tài sản": raw.get("organizer", "Tổ chức hành nghề đấu giá")[:300],
+        "Link chi tiết": raw.get("url", "https://daugia24.com"),
+        "Link xuất file Doc": raw.get("url", "https://daugia24.com"),
         "status_tab": status_tab,
         "auction_date": iso_date,
         "result_status": result_status,
@@ -140,7 +179,7 @@ def push_to_supabase(records):
     if not records:
         return 0
     url = f"{SUPABASE_URL}/rest/v1/auctions"
-    batch_size = 50
+    batch_size = 30
     pushed = 0
 
     for i in range(0, len(records), batch_size):
@@ -149,31 +188,40 @@ def push_to_supabase(records):
             res = requests.post(url, json=chunk, headers=SUPABASE_HEADERS, timeout=30)
             if res.status_code in [200, 201]:
                 pushed += len(chunk)
-                logging.info(f"Successfully synced batch {i//batch_size + 1} ({len(chunk)} listings) to 'auctions'.")
+                logging.info(f"Successfully pushed batch {i//batch_size + 1} ({len(chunk)} items) to 'auctions'.")
             else:
-                logging.error(f"Supabase error [{res.status_code}]: {res.text}")
+                logging.error(f"Supabase push error [{res.status_code}]: {res.text}")
         except Exception as e:
-            logging.error(f"Push exception: {e}")
+            logging.error(f"Supabase push exception: {e}")
             
     return pushed
 
 def run_pipeline():
-    logging.info("=== Starting Nationwide Auction Houses Scraper (All Statuses) ===")
-    raw_items = fetch_nationwide_auction_houses()
-    logging.info(f"Total raw listings fetched across national auction houses: {len(raw_items)}")
+    logging.info("=== Starting Nationwide Auction Scraping (HTML Direct Parser) ===")
+    all_raw = []
+    
+    # 1. 락비엣 경매
+    lacviet_items = scrape_lacviet_auctions()
+    logging.info(f"Fetched from Lạc Việt: {len(lacviet_items)} items")
+    all_raw.extend(lacviet_items)
+    
+    # 2. VPA 경매
+    vpa_items = scrape_vpa_auctions()
+    logging.info(f"Fetched from VPA: {len(vpa_items)} items")
+    all_raw.extend(vpa_items)
 
     clean_records = []
-    for raw in raw_items:
-        normalized = normalize_to_auctions(raw)
-        if normalized:
-            clean_records.append(normalized)
+    for raw in all_raw:
+        norm = normalize_to_auctions(raw)
+        if norm:
+            clean_records.append(norm)
 
     if clean_records:
-        logging.info(f"Prepared {len(clean_records)} normalized auction listings (Open/Failed/Closed).")
+        logging.info(f"Total valid parsed listings: {len(clean_records)}. Syncing to Supabase...")
         total = push_to_supabase(clean_records)
-        logging.info(f"=== Complete! Successfully updated {total} properties to DauGia24. ===")
+        logging.info(f"=== Complete! Synced {total} listings to 'auctions' table. ===")
     else:
-        logging.warning("No listings retrieved in this cycle.")
+        logging.warning("No listings could be parsed from web pages.")
 
 if __name__ == "__main__":
     run_pipeline()
