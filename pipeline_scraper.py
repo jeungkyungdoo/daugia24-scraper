@@ -3,14 +3,23 @@ import sys
 import time
 import re
 import logging
+import subprocess
+
+# 1. 깃허브 환경에 beautifulsoup4 라이브러리 자동 설치
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4"])
+    from bs4 import BeautifulSoup
+
 import requests
 import urllib3
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# 2. Supabase 접속 인증
 DEFAULT_URL = "https://sznnlmtgoiqxgbhqjqfg.supabase.co"
 DEFAULT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6bm5sbXRnb2lxeGdiaHFqcWZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4NTM0ODUsImV4cCI6MjEwNDQyOTQ4NX0.r--e2DrkD3-kDxGsaNXD36ckv8f_r_BUwXNvEraCzuI"
 
@@ -53,9 +62,6 @@ def parse_date(date_str):
     return None, clean
 
 def scrape_lacviet_auctions():
-    """
-    베트남 대표 전국 경매사(Lạc Việt) 웹페이지 직접 파싱
-    """
     items = []
     urls = [
         "https://lacvietauction.vn/tai-san-dau-gia",
@@ -98,9 +104,6 @@ def scrape_lacviet_auctions():
     return items
 
 def scrape_vpa_auctions():
-    """
-    베트남 자산 경매 포털(VPA / Hợp Danh Việt Nam) 파싱
-    """
     items = []
     target_url = "https://vpa.com.vn/danh-sach-tai-san"
     try:
@@ -142,7 +145,7 @@ def normalize_to_auctions(raw):
     status_tab = "OPEN"
     result_status = "PENDING"
 
-    # 상태 자동 분류 (신건, 유찰, 낙찰)
+    # 신건, 유찰, 낙찰 탭 분류
     if any(k in status_text for k in ["KHÔNG THÀNH", "HỦY", "FAILED", "TẠM DỪNG"]):
         status_tab = "FAILED"
         result_status = "FAILED"
@@ -200,12 +203,12 @@ def run_pipeline():
     logging.info("=== Starting Nationwide Auction Scraping (HTML Direct Parser) ===")
     all_raw = []
     
-    # 1. 락비엣 경매
+    # 1. 락비엣 경매 수집
     lacviet_items = scrape_lacviet_auctions()
     logging.info(f"Fetched from Lạc Việt: {len(lacviet_items)} items")
     all_raw.extend(lacviet_items)
     
-    # 2. VPA 경매
+    # 2. VPA 경매 수집
     vpa_items = scrape_vpa_auctions()
     logging.info(f"Fetched from VPA: {len(vpa_items)} items")
     all_raw.extend(vpa_items)
