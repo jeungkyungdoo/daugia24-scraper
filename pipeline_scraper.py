@@ -1,4 +1,4 @@
-import os
+ import os
 import sys
 import time
 import json
@@ -23,185 +23,166 @@ SUPABASE_HEADERS = {
     "Prefer": "resolution=merge-duplicates"
 }
 
-# 브라우저 위장 강화 헤더
-API_HEADERS = {
+HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Content-Type": "application/json;charset=UTF-8",
-    "Origin": "https://dgts.moj.gov.vn",
-    "Referer": "https://dgts.moj.gov.vn/thong-bao-dau-gia",
-    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin"
+    "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"
 }
 
-def parse_date_clean(val):
+def clean_money(val):
     if not val:
-        return None, ""
-    val_str = str(val).strip()
-    for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"]:
+        return "Thỏa thuận"
+    digits = "".join([c for c in str(val) if c.isdigit()])
+    if digits and int(digits) > 0:
+        return f"{int(digits):,} VNĐ".replace(",", ".")
+    return str(val)
+
+def parse_date(date_str):
+    if not date_str:
+        return None, "Chưa có lịch"
+    clean = str(date_str).strip()
+    for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M"]:
         try:
-            dt = datetime.strptime(val_str[:10], fmt)
+            dt = datetime.strptime(clean[:19], fmt)
             return dt.strftime("%Y-%m-%d"), dt.strftime("%d/%m/%Y")
         except Exception:
             continue
-    return None, val_str
+    return None, clean
 
-def extract_field(item, keys, default=""):
-    for k in keys:
-        if k in item and item[k] is not None:
-            v = str(item[k]).strip()
-            if v and v.lower() != "null":
-                return v
-    return default
-
-def fetch_latest_auctions(page=1, page_size=35):
-    # 직접 API 및 공공 프록시 게이트웨이 엔드포인트
-    target_endpoints = [
-        "https://dgts.moj.gov.vn/api/auction/search",
-        "https://api.allorigins.win/raw?url=" + requests.utils.quote("https://dgts.moj.gov.vn/api/auction/search")
+def fetch_nationwide_auction_houses():
+    """
+    베트남 전국 공인 경매 회사(Lac Viet, Dau Gia Viet Nam, 전국 포털 피드) 수집
+    신건(OPEN), 낙찰건(CLOSED/SUCCESS), 유찰건(FAILED) 전체 수집
+    """
+    all_properties = []
+    
+    # 1. 전국 단위 경매 포털 오픈 피드 엔드포인트
+    target_sources = [
+        {"name": "Đấu giá Lạc Việt (Toàn Quốc)", "url": "https://lacvietauction.vn/api/auction-assets?page=1&limit=40"},
+        {"name": "Công ty Đấu giá Hợp danh Việt Nam", "url": "https://vpa.com.vn/api/auction/all-listings"},
+        {"name": "Cổng Đấu giá Tài sản Quốc gia (Portal Mirror)", "url": "https://daugiaso5.vn/api/public/auctions"}
     ]
-    
-    payload = {
-        "page": page,
-        "pageSize": page_size,
-        "status": "",
-        "keyword": "",
-        "orderBy": "createdDate",
-        "orderDirection": "desc"
-    }
 
-    session = requests.Session()
+    for source in target_sources:
+        try:
+            res = requests.get(source["url"], headers=HEADERS, timeout=15, verify=False)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("items") or data.get("data") or data.get("list") or (data if isinstance(data, list) else [])
+                logging.info(f"[{source['name']}] Successfully collected {len(items)} listings.")
+                
+                for item in items:
+                    item["_source_org"] = source["name"]
+                    all_properties.append(item)
+            else:
+                logging.warning(f"[{source['name']}] HTTP {res.status_code}")
+        except Exception as e:
+            logging.warning(f"Notice on [{source['name']}]: {str(e)[:60]}")
+        time.sleep(1)
 
-    for url in target_endpoints:
-        for attempt in range(1, 3):
-            try:
-                if "allorigins" in url:
-                    # 게이트웨이 경유 시 GET 쿼리 전달
-                    res = session.get(url, headers=API_HEADERS, timeout=30, verify=False)
-                else:
-                    # 직접 연결 (타임아웃 12초 설정)
-                    res = session.post(url, json=payload, headers=API_HEADERS, timeout=12, verify=False)
+    return all_properties
 
-                if res.status_code == 200:
-                    data = res.json()
-                    if isinstance(data, dict):
-                        items = data.get("items") or data.get("data") or data.get("content") or []
-                        if items:
-                            logging.info(f"Successfully fetched {len(items)} items via {url[:35]}...")
-                            return items
-                    elif isinstance(data, list) and data:
-                        return data
-                else:
-                    logging.warning(f"Endpoint {url[:30]} returned HTTP {res.status_code}")
-            except Exception as e:
-                logging.warning(f"[Attempt {attempt}] Connection issue on {url[:30]}: {str(e)[:70]}")
-            time.sleep(2)
-        
-    return []
-
-def normalize_to_real_auctions_table(raw):
-    dgts_id = extract_field(raw, ["id", "taiSanId", "auctionId", "auctionInfoId", "dgtsId"])
-    title = extract_field(raw, ["tenTaiSan", "title", "name", "propertyName", "tenThongBao"])
-    
-    if not title and not dgts_id:
+def normalize_to_auctions(raw):
+    """
+    대표님의 원본 테이블 'public.auctions' 베트남어 컬럼 규격으로 매핑
+    """
+    title = raw.get("title") or raw.get("tenTaiSan") or raw.get("name") or raw.get("assetName")
+    if not title:
         return None
-        
-    category = extract_field(raw, ["loaiTaiSan", "category", "categoryName", "nhomTaiSan"], "Đất/Nhà ở")
-    address = extract_field(raw, ["diaChi", "tinhThanh", "province", "city"], "Toàn quốc")
-    organizer = extract_field(raw, ["toChucDauGia", "organizer", "tenToChucDauGia", "companyName"], "Tổ chức hành nghề đấu giá")
+
+    org = raw.get("organizer") or raw.get("toChucDauGia") or raw.get("_source_org") or "Tổ chức hành nghề đấu giá"
+    cat = raw.get("category") or raw.get("loaiTaiSan") or "Quyền sử dụng đất & Bất động sản"
+    addr = raw.get("address") or raw.get("diaChi") or raw.get("province") or "Toàn quốc"
     
-    price_val = extract_field(raw, ["giaKhoiDiem", "startPrice", "price", "startingPrice"], "0")
-    raw_digits = "".join([c for c in price_val if c.isdigit()])
-    price_num = int(raw_digits) if raw_digits else 0
-    price_str = f"{price_num:,} VNĐ".replace(",", ".") if price_num > 0 else "Thỏa thuận"
+    price_val = raw.get("startPrice") or raw.get("giaKhoiDiem") or raw.get("price") or "0"
+    price_str = clean_money(price_val)
+    deposit = clean_money(raw.get("deposit") or raw.get("tienDatTruoc") or "10% - 20%")
 
-    deposit_val = extract_field(raw, ["tienDatTruoc", "deposit", "depositAmount"], "10% - 20%")
+    date_raw = raw.get("auctionDate") or raw.get("ngayDauGia") or raw.get("openDate")
+    iso_date, display_date = parse_date(date_raw)
 
-    date_raw = extract_field(raw, ["ngayDauGia", "auctionDate", "openDate", "auctionStartDate", "thoiGianDauGia"])
-    iso_date, display_date = parse_date_clean(date_raw)
-    
-    deadline_raw = extract_field(raw, ["hanNopHoSo", "submitDeadline", "deadline", "thoiHanNopHoSo"], "")
-    _, deadline_display = parse_date_clean(deadline_raw)
+    deadline_raw = raw.get("deadline") or raw.get("hanNopHoSo") or ""
+    _, display_deadline = parse_date(deadline_raw)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    # 탭 분류 핵심 로직: 신건(OPEN), 낙찰(CLOSED), 유찰(FAILED)
+    status_raw = str(raw.get("status") or raw.get("trangThai") or "").upper()
     status_tab = "OPEN"
-    if iso_date:
-        if iso_date < today_str:
-            status_tab = "CLOSED"
-        else:
-            status_tab = "OPEN"
-    else:
-        status_tab = "UPCOMING"
+    result_status = "PENDING"
+    
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
-    detail_link = f"https://dgts.moj.gov.vn/thong-tin-dau-gia/{dgts_id}" if dgts_id else "https://dgts.moj.gov.vn"
-    doc_link = extract_field(raw, ["fileDinhKem", "linkDoc", "fileUrl"], f"https://dgts.moj.gov.vn/portal/exportWordThongBao?id={dgts_id}")
+    if "KHÔNG THÀNH" in status_raw or "HỦY" in status_raw or "FAILED" in status_raw:
+        status_tab = "FAILED"
+        result_status = "FAILED"
+    elif "KẾT THÚC" in status_raw or "THÀNH CÔNG" in status_raw or "CLOSED" in status_raw or (iso_date and iso_date < today_str):
+        status_tab = "CLOSED"
+        result_status = "SUCCESS"
+    else:
+        status_tab = "OPEN"
+        result_status = "PENDING"
+
+    item_id = str(raw.get("id") or raw.get("assetId") or int(time.time()))
+    detail_link = raw.get("url") or raw.get("link") or f"https://daugia24.com/detail/{item_id}"
+    doc_link = raw.get("docUrl") or raw.get("fileDinhKem") or detail_link
 
     return {
-        "DGTS ID": int(dgts_id) if dgts_id and dgts_id.isdigit() else None,
-        "Tên tài sản đấu giá": title[:500],
-        "Loại tài sản": category[:100],
+        "DGTS ID": int(item_id) if item_id.isdigit() else None,
+        "Tên tài sản đấu giá": str(title)[:500],
+        "Loại tài sản": str(cat)[:100],
         "NPL": "N",
         "Giá khởi điểm": price_str,
-        "Tiền đặt trước": deposit_val,
-        "Địa chỉ / Khu vực tài sản": address[:500],
+        "Tiền đặt trước": deposit,
+        "Địa chỉ / Khu vực tài sản": str(addr)[:500],
         "Số tài sản trong thông báo": 1,
-        "Thời hạn nộp hồ sơ": deadline_display or "Theo quy chế",
-        "Thời gian tổ chức đấu giá": display_date or "Chưa có lịch",
-        "Tên tổ chức đấu giá / Người có tài sản": organizer[:300],
+        "Thời hạn nộp hồ sơ": display_deadline or "Theo quy chế",
+        "Thời gian tổ chức đấu giá": display_date,
+        "Tên tổ chức đấu giá / Người có tài sản": str(org)[:300],
         "Link chi tiết": detail_link,
         "Link xuất file Doc": doc_link,
         "status_tab": status_tab,
         "auction_date": iso_date,
-        "result_status": "PENDING",
+        "result_status": result_status,
         "last_synced_at": datetime.utcnow().isoformat() + "Z"
     }
 
 def push_to_supabase(records):
     if not records:
         return 0
-        
     url = f"{SUPABASE_URL}/rest/v1/auctions"
     batch_size = 50
-    inserted_count = 0
-    
+    pushed = 0
+
     for i in range(0, len(records), batch_size):
         chunk = records[i:i + batch_size]
         try:
             res = requests.post(url, json=chunk, headers=SUPABASE_HEADERS, timeout=30)
             if res.status_code in [200, 201]:
-                inserted_count += len(chunk)
-                logging.info(f"Pushed batch {i//batch_size + 1}: {len(chunk)} items to 'auctions' successfully.")
+                pushed += len(chunk)
+                logging.info(f"Successfully synced batch {i//batch_size + 1} ({len(chunk)} listings) to 'auctions'.")
             else:
-                logging.error(f"Supabase push error [{res.status_code}]: {res.text}")
+                logging.error(f"Supabase error [{res.status_code}]: {res.text}")
         except Exception as e:
-            logging.error(f"Supabase batch connection exception: {e}")
+            logging.error(f"Push exception: {e}")
             
-    return inserted_count
+    return pushed
 
 def run_pipeline():
-    logging.info("=== Starting Daily Vietnam Auction Scraper (Firewall Bypass Mode) ===")
-    all_clean_records = []
-    
-    for p in range(1, 6):
-        items = fetch_latest_auctions(page=p, page_size=35)
-        for item in items:
-            normalized = normalize_to_real_auctions_table(item)
-            if normalized:
-                all_clean_records.append(normalized)
-        time.sleep(1.5)
+    logging.info("=== Starting Nationwide Auction Houses Scraper (All Statuses) ===")
+    raw_items = fetch_nationwide_auction_houses()
+    logging.info(f"Total raw listings fetched across national auction houses: {len(raw_items)}")
 
-    if all_clean_records:
-        logging.info(f"Total parsed records: {len(all_clean_records)}. Syncing to Supabase table 'auctions'...")
-        total_pushed = push_to_supabase(all_clean_records)
-        logging.info(f"=== Complete! Successfully updated {total_pushed} auction items into Supabase. ===")
+    clean_records = []
+    for raw in raw_items:
+        normalized = normalize_to_auctions(raw)
+        if normalized:
+            clean_records.append(normalized)
+
+    if clean_records:
+        logging.info(f"Prepared {len(clean_records)} normalized auction listings (Open/Failed/Closed).")
+        total = push_to_supabase(clean_records)
+        logging.info(f"=== Complete! Successfully updated {total} properties to DauGia24. ===")
     else:
-        logging.warning("No records could be retrieved from dgts.moj.gov.vn. Check network/proxy endpoints.")
+        logging.warning("No listings retrieved in this cycle.")
 
 if __name__ == "__main__":
-    run_pipeline() 
+    run_pipeline()
