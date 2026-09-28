@@ -13,13 +13,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 1. Supabase 환경변수 연결 (yml 파일과 100% 일치)
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://sznnlmtgoiqxgbhqjqfg.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+# 1. Supabase 접속 정보 (환경변수가 없어도 기본키로 작동하도록 내장)
+DEFAULT_URL = "https://sznnlmtgoiqxgbhqjqfg.supabase.co"
+DEFAULT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6bm5sbXRnb2lxeGdiaHFqcWZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4NTM0ODUsImV4cCI6MjEwNDQyOTQ4NX0.r--e2DrkD3-kDxGsaNXD36ckv8f_r_BUwXNvEraCzuI"
 
-if not SUPABASE_KEY:
-    logging.error("FATAL: SUPABASE_KEY is missing from environment variables!")
-    sys.exit(1)
+SUPABASE_URL = os.environ.get("SUPABASE_URL") or DEFAULT_URL
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY") or DEFAULT_KEY
+
+logging.info(f"Connected to Supabase Project: {SUPABASE_URL}")
 
 # 2. 웹사이트(index.html)와 완벽히 호환되는 auctions_web 테이블용 헤더
 SUPABASE_HEADERS = {
@@ -70,7 +71,6 @@ def fetch_latest_auctions(page=1, page_size=40):
         "orderDirection": "desc"
     }
     
-    # 3회 재시도 (방화벽 지연 대비)
     for attempt in range(1, 4):
         try:
             res = requests.post(url, json=payload, headers=API_HEADERS, timeout=25, verify=False)
@@ -89,9 +89,6 @@ def fetch_latest_auctions(page=1, page_size=40):
     return []
 
 def normalize_to_auctions_web(raw):
-    """
-    대표님의 웹사이트(index.html)가 사용하는 `auctions_web` 테이블 스키마 규격으로 정밀 매핑
-    """
     raw_id = extract_field(raw, ["id", "taiSanId", "auctionId", "auctionInfoId", "dgtsId"])
     title = extract_field(raw, ["tenTaiSan", "title", "name", "propertyName", "tenThongBao"])
     
@@ -113,7 +110,6 @@ def normalize_to_auctions_web(raw):
     deadline_raw = extract_field(raw, ["hanNopHoSo", "submitDeadline", "deadline", "thoiHanNopHoSo"], "")
     _, deadline_display = parse_date_clean(deadline_raw)
 
-    # 탭 상태 분기
     today_str = datetime.now().strftime("%Y-%m-%d")
     status_tab = "OPEN"
     if iso_date:
@@ -145,10 +141,7 @@ def push_to_supabase(records):
     if not records:
         return 0
         
-    # [핵심] 실제 웹사이트 테이블인 auctions_web 에 직접 삽입
     url = f"{SUPABASE_URL}/rest/v1/auctions_web"
-    
-    # 50개 단위 배치 처리
     batch_size = 50
     inserted_count = 0
     
@@ -170,7 +163,6 @@ def run_pipeline():
     logging.info("=== Starting Daily Vietnam Auction Scraper to auctions_web ===")
     all_clean_records = []
     
-    # 1페이지부터 5페이지까지 최신 공고 추출 (약 150~200건)
     for p in range(1, 6):
         items = fetch_latest_auctions(page=p, page_size=35)
         logging.info(f"Page {p}: Found {len(items)} raw auction items from Ministry of Justice.")
@@ -189,4 +181,4 @@ def run_pipeline():
         logging.warning("No records could be retrieved from dgts.moj.gov.vn. Check firewall / network status.")
 
 if __name__ == "__main__":
-    run_pipeline()
+    run_pipeline() 
