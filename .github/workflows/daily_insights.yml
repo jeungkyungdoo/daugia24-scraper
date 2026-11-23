@@ -1,7 +1,8 @@
 name: Daily AI Insights Collector
 on:
   schedule:
-    - cron: '30 23 * * *'
+    - cron: '30 23 * * *'   # 한국시간 매일 오전 8:30
+    - cron: '30 12 * * *'   # 한국시간 매일 밤 9:30 (21:30)
   workflow_dispatch:
 
 jobs:
@@ -18,4 +19,4 @@ jobs:
           PB_URL: ${{ secrets.PB_URL }}
           PB_ADMIN_EMAIL: ${{ secrets.PB_ADMIN_EMAIL }}
           PB_ADMIN_PASSWORD: ${{ secrets.PB_ADMIN_PASSWORD }}
-        run: python cloud_agent.py
+        run: python cloud_agent.py 
